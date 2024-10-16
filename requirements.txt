@@ -1,0 +1,23 @@
+google-cloud-aiplatform[langchain] 
+openai
+langchain-openai
+fastapi
+uvicorn
+python-multipart
+google-cloud
+
+python-dotenv==1.0.0
+cloud-sql-python-connector
+PyMySQL
+mysql-connector-python
+sqlalchemy
+cloud-sql-python-connector[asyncpg]==1.2.3
+pandas
+# google-cloud-speech
+google-cloud-texttospeech
+transformers
+datasets
+torch
+librosa
+soundfile
+pydub
