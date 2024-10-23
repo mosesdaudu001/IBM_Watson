@@ -3,70 +3,40 @@ from fastapi.responses import JSONResponse
 import os
 from fastapi.middleware.cors import CORSMiddleware
 import time
-# from pydantic import BaseModel
 import base64
 import pandas as pd
 import re
 import io
-# from some_database_module import connect_with_db, push_df_db
-# from some_vertex_ai_module import model, Part, SafetySetting
 import uuid
 import openai
 import asyncio
-from google.auth import default, transport
-import vertexai
-from vertexai.preview import rag
-from vertexai.preview.generative_models import GenerativeModel, Tool, Part, SafetySetting
-# Build
 from dataclass import *
-import vertexai
-from google.cloud import storage
 import uvicorn
 import soundfile as sf
-
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "./development-416403-b306695feb67.json"
-
-# Import neccessary dependencies
-from google.cloud import storage, texttospeech
-from dotenv import load_dotenv 
-import pymysql 
-import sqlalchemy
-from google.cloud.sql.connector import Connector, IPTypes
-
-# from transformers import WhisperProcessor, WhisperForConditionalGeneration
-# from datasets import load_dataset
+import config
 from pydub import AudioSegment
 
-# load model and processor
-# processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
-# model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
-# model.config.forced_decoder_ids = None
+import json
+from ibm_watson import AssistantV2
+from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+from os.path import join, dirname
+from ibm_watson import SpeechToTextV1, TextToSpeechV1
+from ibm_watson.websocket import RecognizeCallback, AudioSource, SynthesizeCallback
+import threading
 
-text_client = texttospeech.TextToSpeechClient()
-generation_config = {
-    "max_output_tokens": 8192,
-    "temperature": 1,
-    "top_p": 0.95,
-}
+authenticator = IAMAuthenticator(config.api_key)
 
-safety_settings = [
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-]
+service = SpeechToTextV1(authenticator=authenticator)
+service.set_service_url('https://api.us-south.speech-to-text.watson.cloud.ibm.com')
+model = service.get_model('en-US_BroadbandModel').get_result()
+
+tts_service = TextToSpeechV1(authenticator=authenticator)
+tts_service.set_service_url('https://api.us-south.text-to-speech.watson.cloud.ibm.com')
+
+assistant = AssistantV2(
+    version='2018-09-20',
+    authenticator=authenticator)
+assistant.set_service_url('https://api.us-south.assistant.watson.cloud.ibm.com')
 
 # Function to generate a unique identifier for each question
 def generate_question_id():
@@ -208,27 +178,11 @@ def generate_weekly_str(st):
     return result
 
 
-async def move_file_to_rag(GS_BUCKET):
-    response = await rag.import_files_async(  # noqa: F704
-        corpus_name=rag_corpus.name,
-        # corpus_name="projects/development-416403/locations/us-central1/ragCorpora/2443202797848494080",
-        paths=GS_BUCKET,
-        chunk_size=512,
-        chunk_overlap=50,
-    )
-            
             
 BUCKET_URI = f"development_awarri"
 PROJECT_ID = "development-416403"
 LOCATION = "us-central1"
 vertexai.init(project=PROJECT_ID, location=LOCATION)
-# rag_corpus = rag.get_corpus(name = "projects/development-416403/locations/us-central1/ragCorpora/713820540938223616")
-
-# client = openai.OpenAI(
-#     base_url=f"https://us-central1-aiplatform.googleapis.com/v1beta1/projects/{PROJECT_ID}/locations/us-central1/endpoints/openapi/chat/completions?",
-#     api_key="ya29.a0AcM612w_lHMevsnPyNOk8qo9De15RosFGjAb0WYU-617zsfrY42vhD9IGYE_kJmdN4kw0eTf1x2TvIeSznntdOwuLsd3zNVlYFuMebgPpDXmi7PI7EXCc1IOdNplk0WURagvUemnvAsMtdSemG8vwzRYGyV34xj_JS9mqdkHZwaCgYKAagSARASFQHGX2MirWd0XdIXkGv28USU2YdBeA0177",
-# )
-
 MODEL_ID = "meta/llama3-405b-instruct-maas" 
 
 chat_history = []
@@ -379,14 +333,18 @@ def upload_files(email: str = Form(...), subject: str = Form(...), langauge: str
         inclusive multi-speaker multi-accent speech synthesis and increase the representation of African English accents.
         Please let your response be in the exact same format as the above example, and when the chosen language is not English, ensure that there are no English text in your response except for the subseequent W_e_e_ks, flash_cards, F_r_o_n_ts and B_a_c_ks.""" 
         prompt.append(GENERATION_PROMPT)
-        responses = uploading_model.generate_content(
-            GENERATION_PROMPT,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=True,
-        )
+        
+        message = assistant.message(
+            config.ASSISTANT_ID,
+            config.SESSION_ID,
+            input={'text': prompt},
+            context={
+                'metadata': {
+                    'deployment': 'myDeployment'
+                }
+            }).get_result()
 
-        response = "".join([response.text for response in responses])
+        response = json.dumps(message, indent=2)
         
         # Regex patterns
         week_pattern = r'W_e_e_k (\d+):'
@@ -431,27 +389,10 @@ def upload_files(email: str = Form(...), subject: str = Form(...), langauge: str
 @app.post("/upload_audios")
 def upload_audios(task : AudioUploader):
     try:
-        
-        forced_decoder_ids = processor.get_decoder_prompt_ids(language=task.langauge, task="transcribe")
-
         audio_bytes = io.BytesIO(base64.b64decode(task.audio_base64_content.split(',')[1]))
-        
+        transcription = json.dumps(service.recognize(audio=audio_file,content_type='audio/wav',timestamps=True,word_confidence=True).get_result(),indent=2)
         audio = AudioSegment.from_file(audio_bytes, format="webm")
-        # print("Doneeee")
-        audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        audio_bytes_io = io.BytesIO()
-        audio.export(audio_bytes_io, format="wav")
-        audio_bytes_io.seek(0)
 
-        audio_data, _ = sf.read(audio_bytes_io)
-        # output = pipe(audio_data, batch_size=8)["text"]
-        input_features = processor(audio_data, sampling_rate=16000, return_tensors="pt").input_features
-
-        # generate token ids
-        predicted_ids = model.generate(input_features, forced_decoder_ids=forced_decoder_ids)
-        # decode token ids to text
-        transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
-        print("transcription: ", transcription)
         GENERATION_PROMPT = f"""
         You are a tutor that helps people learn difficult and also simple things by creating flash cards for them in their desired language. When you are teaching, you teach in only the language that the student specified.
         You create 10 flash cards for each week depending on the time frame specified by the student.
@@ -464,14 +405,19 @@ def upload_audios(task : AudioUploader):
         African Voices project?\nB_a_c_k: The goal of the TTS - 1000 African Voices project is to advance 
         inclusive multi-speaker multi-accent speech synthesis and increase the representation of African English accents.
         Please let your response be in the exact same format as the above example, and when the chosen language is not English, ensure that there are no English text in your response except for the subseequent W_e_e_ks, flash_cards, F_r_o_n_ts and B_a_c_ks.""" 
-        responses = uploading_model.generate_content(
-            GENERATION_PROMPT,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=True,
-        )
+        
+        message = assistant.message(
+            config.ASSISTANT_ID,
+            config.SESSION_ID,
+            input={'text': GENERATION_PROMPT},
+            context={
+                'metadata': {
+                    'deployment': 'myDeployment'
+                }
+            }).get_result()
 
-        response = "".join([response.text for response in responses])
+        response = json.dumps(message, indent=2)
+        
         print("response: ", response)
         # Regex patterns
         week_pattern = r'W_e_e_k (\d+):'
@@ -555,15 +501,9 @@ def get_audio_cards(email: str, subject: str):
         
         # Format cards into a list of dictionaries for JSON response
         formatted_cards = [
-            {"week": str(card[0]), "id": card[1], "question": card[2], "answer": card[3]}
-            for card in cards[0:1]
+            {"week": str(card[0]), "id": card[1], "question": tts_service.synthesize(card[2], accept='audio/wav',voice="en-US_AllisonVoice").get_result(), "answer": tts_service.synthesize(card[3], accept='audio/wav',voice="en-US_AllisonVoice").get_result()}
+            for card in cards
         ]
-        # input_text = texttospeech.SynthesisInput(text=)
-        # formatted_cards = [
-        #     {"week": str(card[0]), "id": card[1], "question": text_client.synthesize_speech(request={"input": texttospeech.SynthesisInput(text=card[2]), "voice": voice, "audio_config": audio_config}), "answer": text_client.synthesize_speech(request={"input": texttospeech.SynthesisInput(text=card[3]), "voice": voice, "audio_config": audio_config})}
-        #     for card in cards[0:1]
-        # ]
-        
         
         return {"cards": formatted_cards}
     except Exception as e:
@@ -604,14 +544,17 @@ def create_quizes(email: str = Form(...), subject: str = Form(...)):
 
         CHAT_COMPLETIONS_PROMPT = f"""
         You are an expert in several langauges, I want you to answer in one word what language is this text:{lang}."""
-        responses = uploading_model.generate_content(
-            CHAT_COMPLETIONS_PROMPT,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=True,
-        )
-        print("responses: ", responses)
-        langauge = "".join([response.text for response in responses])
+        message = assistant.message(
+            config.ASSISTANT_ID,
+            config.SESSION_ID,
+            input={'text': CHAT_COMPLETIONS_PROMPT},
+            context={
+                'metadata': {
+                    'deployment': 'myDeployment'
+                }
+            }).get_result()
+
+        response = json.dumps(message, indent=2)
         
         _, names = rag_bucket_items(f"reserve/{email}/{subject}")
         
@@ -643,14 +586,17 @@ def create_quizes(email: str = Form(...), subject: str = Form(...)):
         """
      
         prompt.append(GENERATION_PROMPT)
-        responses = uploading_model.generate_content(
-            prompt,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=True,
-        )
+        message = assistant.message(
+            config.ASSISTANT_ID,
+            config.SESSION_ID,
+            input={'text': prompt},
+            context={
+                'metadata': {
+                    'deployment': 'myDeployment'
+                }
+            }).get_result()
 
-        response = "".join([response.text for response in responses])
+        response = json.dumps(message, indent=2)
             
         # Regex patterns to extract different sections
         week_pattern = r"\*\*W_e_e_k (\d+):.*?\*\*"
@@ -707,35 +653,6 @@ def create_quizes(email: str = Form(...), subject: str = Form(...)):
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 
-@app.get("/get_quiz")
-def get_quiz(email: str, subject: str):
-    try:
-        engine = connect_with_db()
-        cards = fetch_quiz_from_db(engine, email, subject)
-        
-        # Format cards into a list of dictionaries for JSON response
-        formatted_cards = [
-            # {"id": card[0], "question": card[1], "options": ["option_a": card[2], "option_b": card[3], "option_c": card[4], "option_d": card[5]]}
-            {"id": card[0], "question": card[1], "options": [card[2], card[3], card[4], card[5]]}
-            for card in cards
-        ]
-        
-        return {"cards": formatted_cards}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-
-@app.post("/submit_answer")
-def submit_answer(id: str, student_response: str):
-    try:
-        engine = connect_with_db()
-        cards = submit_quiz_to_db(engine, id, student_response)
-        
-        return {"cards": "DONE"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-
 @app.get("/evaluate_performance")
 def evaluate_performance(email: str, subject: str):
     try:
@@ -759,14 +676,17 @@ def evaluate_performance(email: str, subject: str):
         O_v_e_r_a_l_l: It seems you're grasping so ..... \n Feedback_Question 1: While honesty is appreciated ...... \n Feedback_Question 2: You're on the right track! However ...
         """
 
-        responses = uploading_model.generate_content(
-            GENERATION_PROMPT,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=True,
-        )
+        message = assistant.message(
+            config.ASSISTANT_ID,
+            config.SESSION_ID,
+            input={'text': GENERATION_PROMPT},
+            context={
+                'metadata': {
+                    'deployment': 'myDeployment'
+                }
+            }).get_result()
 
-        response = "".join([response.text for response in responses])
+        response = json.dumps(message, indent=2)
 
         # Regex patterns to extract O_v_e_r_a_l_l and Feedback_Questions
         overall_pattern = r"O_v_e_r_a_l_l: (.+?)\n\n"
